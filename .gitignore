@@ -12,3 +12,4 @@ data/processed/*.csv
 # Track only the final deployable model; ignore older/intermediate artifacts.
 models/*.joblib
 !models/emg_binary_v3_combined_normalized.joblib
+models/vosk/
