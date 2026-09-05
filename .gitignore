@@ -5,8 +5,10 @@ __pycache__/
 .pytest_cache/
 .coverage
 
-# Local datasets and trained artifacts must not be committed.
-data/*
-!data/.gitkeep
-models/*
-!models/.gitkeep
+# Local datasets must not be committed.
+data/raw/*.csv
+data/processed/*.csv
+
+# Track only the final deployable model; ignore older/intermediate artifacts.
+models/*.joblib
+!models/emg_binary_v3_combined_normalized.joblib
