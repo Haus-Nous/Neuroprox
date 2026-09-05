@@ -94,6 +94,7 @@ def listen(
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     block_size: int = DEFAULT_BLOCK_SIZE,
     device: int | str | None = None,
+    verbose: bool = True,
 ) -> None:
     """Capture default-microphone audio and emit commands until interrupted."""
 
@@ -101,13 +102,15 @@ def listen(
         raise RuntimeError(f"Vosk model is missing or incomplete: {model_path}")
     try:
         import sounddevice as sd
-        from vosk import KaldiRecognizer, Model
+        from vosk import KaldiRecognizer, Model, SetLogLevel
     except ImportError as exc:
         raise RuntimeError(
             "Voice dependencies are missing; run: "
             "python -m pip install -r requirements.txt"
         ) from exc
 
+    # Vosk otherwise writes verbose native-library startup diagnostics to stderr.
+    SetLogLevel(-1)
     model = Model(str(model_path))
     recognizer = KaldiRecognizer(model, sample_rate, json.dumps(VOICE_GRAMMAR))
     recognizer.SetWords(True)
@@ -120,7 +123,7 @@ def listen(
 
     def audio_callback(indata, frames, timing, status) -> None:
         del frames, timing
-        if status:
+        if status and verbose:
             print(f"Audio status: {status}", file=sys.stderr)
         chunk = bytes(indata)
         try:

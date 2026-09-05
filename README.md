@@ -1,143 +1,134 @@
 # NeuroProx NEOS
 
-NEOS is the software-side interface for the NeuroProx bionic arm. The command
-contract between EMG/voice producers and Ishank's hardware/motor-control
-consumer remains frozen. Phase 1 adds raw EMG acquisition, but deliberately
-contains no signal processing, machine learning, or speech recognition.
+NeuroProx is a bionic-arm project, and NEOS is its Python control software. It
+turns either live muscle activity from a single-channel EMG sensor or the spoken
+words **“open”** and **“close”** into one stable command interface for the arm.
+The unified runner uses EMG whenever responsive hardware is connected and uses
+offline Vosk voice control otherwise; the two input modes never run together.
 
-## Integration contract
+## Hardware integration contract
 
-Every producer emits a `core.CommandMessage` with exactly these fields:
+Both input modes publish an immutable `core.CommandMessage` through the same
+`core.CommandBus`. This is the interface Ishank's motor-control code should
+consume:
 
-| Field | Type | Allowed value / meaning |
+| Field | Type | Values |
 |---|---|---|
-| `command` | `Command` string enum | `OPEN` or `CLOSE` |
-| `confidence` | float | Inclusive range `0.0` to `1.0` |
-| `source` | `CommandSource` string enum | `EMG` or `VOICE` |
-| `timestamp` | timezone-aware datetime | Serialized as an ISO 8601 UTC string |
+| `command` | string enum | `OPEN`, `CLOSE` |
+| `confidence` | float | `0.0` through `1.0` |
+| `source` | string enum | `EMG`, `VOICE` |
+| `timestamp` | datetime | timezone-aware ISO 8601 UTC |
 
-Example serialized message:
+Example wire representation:
 
 ```json
 {"command":"OPEN","confidence":0.99,"source":"EMG","timestamp":"2026-09-04T10:30:00+00:00"}
 ```
 
-This schema and its serialized field names are the hardware/motor integration
-contract. Discuss and coordinate any change with the hardware team before
-altering it.
-
-## Consuming commands in the same process
+In-process consumers subscribe once and receive messages from either source:
 
 ```python
 from core import CommandBus
 
 bus = CommandBus()
-
-def move_arm(message):
-    print(message.command, message.confidence, message.source, message.timestamp)
-
-unsubscribe = bus.subscribe(move_arm)
-
-# EMG or voice code receives the same bus instance and calls bus.emit(message).
-# A polling consumer may instead read:
-latest_message = bus.latest()  # None until the first command is emitted
-
-# Stop callback delivery when appropriate:
-unsubscribe()
+unsubscribe = bus.subscribe(lambda message: motor_controller.handle(message))
+latest = bus.latest()  # most recent message, or None
 ```
 
-Callbacks run synchronously in registration order. A callback exception is
-propagated to the emitter. `latest()` is thread-safe and returns the most recent
-immutable message without removing it.
+Callbacks run synchronously in registration order. `latest()` is thread-safe.
+The serial/socket transport contracts are defined but remain stubs. The schema
+and field names are the hardware/motor integration contract; coordinate with the
+hardware team before changing them.
 
-## Mock producer
+## Fresh-clone setup
 
-From the project root, run:
+Python 3.10 or newer is required. On macOS, install PortAudio once (needed by
+the microphone library), then clone and set up the project:
 
 ```bash
-python mock_emitter.py --interval 1 --source EMG
-```
-
-It alternates between `OPEN` and `CLOSE`, emitting each through a real
-`CommandBus`. Its sample subscriber prints the JSON wire representation. Stop it
-with Ctrl-C. Ishank can replace the printing callback with motor-control logic.
-
-## Separate-process transport
-
-`CommandBus(transport=...)` accepts any object implementing
-`CommandTransport.send(CommandMessage)`. `SerialTransport` and `SocketTransport`
-reserve newline-delimited JSON as the wire direction, but both currently raise
-`NotImplementedError`. They are intentional stubs; no serial port or socket is
-opened in this milestone.
-
-```python
-from core import CommandBus, SocketTransport
-
-# Contract is ready, but emit() will raise NotImplementedError until implemented.
-bus = CommandBus(transport=SocketTransport("127.0.0.1", 8765))
-```
-
-## Layout and status
-
-```text
-neuroprox-neos/
-├── core/                 shared schema, command bus, transport contracts
-├── arduino/emg_stream/   timed 500 Hz Arduino Uno EMG streamer
-├── emg/                  serial acquisition plus later-stage placeholders
-├── voice/                voice-recognition placeholder
-├── data/                 local recorded datasets (contents gitignored)
-├── models/               local trained artifacts (contents gitignored)
-├── scripts/               runnable data-recording tools
-├── tests/                standard-library contract tests
-├── mock_emitter.py       timed fake command producer
-├── requirements.txt      dependency scaffold (no packages required yet)
-└── README.md
-```
-
-Implemented now: validated command schema, command bus, transport interface,
-mock producer, a fixed-rate Arduino EMG stream, and randomized labeled raw-data
-recording.
-
-Stubbed for later: EMG acquisition/processing/training/inference, voice command
-recognition, serial output, and socket output. Planned packages are documented
-in `requirements.txt` but intentionally not installed.
-
-## Environment and tests
-
-Python 3.10 or newer is required (the scaffold uses modern type syntax).
-
-```bash
+brew install portaudio
+git clone https://github.com/Haus-Nous/Neuroprox.git
+cd Neuroprox
 python3 -m venv .venv
-source .venv/bin/activate       # Windows: .venv\Scripts\activate
+source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python scripts/download_voice_model.py
+```
+
+The last command downloads the approximately 40 MB
+`vosk-model-small-en-us-0.15` model into `models/vosk/`. That directory is
+gitignored. macOS may ask for microphone permission the first time voice mode
+runs; allow it for the terminal application. Voice mode also requires an
+available microphone input; `python -m sounddevice` lists the audio devices that
+PortAudio can see. The trained EMG v3 model is already included in the
+repository.
+
+For EMG, upload `arduino/emg_stream/emg_stream.ino` to an Arduino Uno and wire
+the Muscle BioAmp Patchy as `OUT -> A0`, `VCC -> 5V`, `GND -> GND`. No EMG
+hardware setup is needed for voice-only operation.
+
+## Run NEOS
+
+From the activated virtual environment, the single demo command is:
+
+```bash
+python scripts/run_neos.py
+```
+
+NEOS probes Arduino-like serial devices for valid ADC samples. If one responds,
+it selects EMG control and guides you through an OPEN_PALM calibration before
+live inference. If none responds, it automatically falls back to offline voice
+control. Specify a known port when auto-detection is unsuitable:
+
+```bash
+python scripts/run_neos.py --emg-port /dev/cu.usbmodem1101
+```
+
+For a minimal demo console showing only mode selection and `EMIT` messages:
+
+```bash
+python scripts/run_neos.py --quiet
+```
+
+In quiet EMG mode, hold a relaxed OPEN_PALM immediately after the mode-selection
+message: calibration begins without the usual prompt or countdown and lasts four
+seconds. Stop either mode with Ctrl-C.
+
+The v3 EMG model requires this per-run OPEN_PALM baseline because electrode
+placement and skin contact shift signal levels between sessions. Its honest
+trial-level, session-aware 5-fold cross-validation estimate is **70.35% mean
+accuracy with a 7.05 percentage-point standard deviation**. This is an
+experimental estimate on the recorded two-session dataset, not a claim of
+clinical performance or guaranteed live accuracy.
+
+## Project status
+
+Phases 0–7 are complete: shared command contract and bus, timed Arduino EMG
+streaming, data acquisition, signal processing and feature extraction, model
+training/evaluation, calibrated real-time EMG inference, offline constrained
+voice recognition, and the mutually exclusive unified runner with automatic
+fallback. Raw and processed datasets and the downloaded Vosk model stay local;
+the deployable EMG v3 model is tracked.
+
+Ishank's remaining integration work is the motor/hardware consumer that
+subscribes to `CommandBus` (or completes one of the separate-process transports)
+and maps `OPEN`/`CLOSE` messages to safe actuator behavior. He does not need to
+depend on the EMG or voice internals.
+
+## Tests and layout
+
+```bash
 python -m unittest discover -s tests -v
 ```
 
-Only `pyserial` is installed for Phase 1; no ML or voice libraries are included.
-
-## EMG hardware bring-up and recording
-
-Wire Muscle BioAmp Patchy `OUT -> A0`, `VCC -> 5V`, and `GND -> GND`, then upload
-`arduino/emg_stream/emg_stream.ino` to the Arduino Uno. It emits one ADC integer
-per line at a timed target of 500 Hz and 115200 baud.
-
-On macOS, list serial ports with pyserial:
-
-```bash
-.venv/bin/python -m serial.tools.list_ports
+```text
+core/                   command schema, bus, and transport contracts
+emg/                    acquisition, processing, training, and inference
+voice/                  offline Vosk recognition
+arduino/emg_stream/     Arduino Uno sampling firmware
+scripts/                unified runner and supporting CLI tools
+models/                 tracked EMG v3 artifact; ignored Vosk download
+data/                   ignored raw and processed recordings
+tests/                  automated tests
 ```
-
-Arduino Uno devices commonly appear as `/dev/cu.usbmodem...`. Use the exact
-value printed on your Mac. Acquisition has two labels: `OPEN_PALM` maps to the
-`OPEN` command and `CLOSED_FIST` maps to the `CLOSE` command. For a short first
-test (one randomized trial for each gesture), run:
-
-```bash
-.venv/bin/python scripts/record_session.py --port /dev/cu.usbmodem1101 --trials-per-gesture 1
-```
-
-Replace `/dev/cu.usbmodem1101` with the discovered port. A full session omits
-the final option and records 20 trials per gesture (40 randomized trials total).
-Each trial uses a 3-second countdown, 4-second recording hold, and 2-second rest.
-CSV output is written to `data/raw/session_<UTC timestamp>.csv`; dataset contents
-remain gitignored.

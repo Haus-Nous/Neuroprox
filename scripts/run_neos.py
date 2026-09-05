@@ -131,21 +131,30 @@ def run_with_fallback(
     *,
     emg_runner: Callable[[EMGConnection, CommandBus], None],
     voice_runner: Callable[[CommandBus], None],
+    quiet: bool = False,
 ) -> str:
     """Run exactly one source, switching to voice only after an EMG failure."""
 
     if detected is None:
-        print("No responsive EMG sensor detected — falling back to voice control")
+        print(
+            "No responsive EMG sensor detected — falling back to voice control",
+            flush=True,
+        )
         voice_runner(bus)
         return "voice"
 
-    print(f"EMG sensor detected on {detected.port} — using EMG control")
+    print(f"EMG sensor detected on {detected.port} — using EMG control", flush=True)
     try:
         emg_runner(detected, bus)
         return "emg"
     except (OSError, IOError, RuntimeError) as exc:
-        print(f"EMG control failed: {exc}", file=sys.stderr)
-        print("Switching to voice control", file=sys.stderr)
+        if not quiet:
+            print(f"EMG control failed: {exc}", file=sys.stderr)
+        print(
+            "EMG connection lost — switching to voice control",
+            file=sys.stderr,
+            flush=True,
+        )
         try:
             detected.connection.close()
         except Exception:
@@ -166,6 +175,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--voice-confidence", type=float, default=0.65)
     parser.add_argument("--voice-debounce-seconds", type=float, default=1.5)
     parser.add_argument("--voice-device", help="optional sounddevice input device")
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="show only mode selection and emitted commands",
+    )
     args = parser.parse_args()
     if args.baud <= 0 or args.probe_seconds <= 0:
         parser.error("baud and probe duration must be positive")
@@ -181,7 +195,9 @@ def main() -> int:
     bus = CommandBus()
     bus.subscribe(lambda message: print(f"EMIT {message.to_json()}", flush=True))
 
-    print("Checking for a responsive EMG sensor...")
+    if not args.quiet:
+        print("=== NeuroProx NEOS — starting ===", flush=True)
+        print("Checking for a responsive EMG sensor...", flush=True)
     detected = detect_emg_connection(
         args.emg_port,
         baud=args.baud,
@@ -191,24 +207,26 @@ def main() -> int:
     def run_emg(selection: EMGConnection, shared_bus: CommandBus) -> None:
         try:
             model = load_inference_model(args.emg_model)
-            print("Calibration: relax your hand in OPEN_PALM and hold still.")
-            input("Press Enter when ready...")
-            for remaining in range(3, 0, -1):
-                print(f"Starting calibration in {remaining}...", flush=True)
-                time.sleep(1)
-            print(
-                f"Recording OPEN_PALM baseline for "
-                f"{args.emg_calibration_seconds:g} seconds..."
-            )
+            if not args.quiet:
+                print("Calibration: relax your hand in OPEN_PALM and hold still.")
+                input("Press Enter when ready...")
+                for remaining in range(3, 0, -1):
+                    print(f"Starting calibration in {remaining}...", flush=True)
+                    time.sleep(1)
+                print(
+                    f"Recording OPEN_PALM baseline for "
+                    f"{args.emg_calibration_seconds:g} seconds..."
+                )
             calibration = calibrate(
                 selection.connection,
                 duration_seconds=args.emg_calibration_seconds,
             )
-            print(
-                f"Calibration complete: baseline RMS={calibration.baseline_rms:.6f}, "
-                f"sample rate={calibration.sample_rate_hz:.2f} Hz"
-            )
-            print("Live EMG inference started. Press Ctrl-C to stop.")
+            if not args.quiet:
+                print(
+                    f"Calibration complete: baseline RMS={calibration.baseline_rms:.6f}, "
+                    f"sample rate={calibration.sample_rate_hz:.2f} Hz"
+                )
+                print("Live EMG inference started. Press Ctrl-C to stop.")
             run_live_inference(
                 selection.connection,
                 model,
@@ -228,13 +246,22 @@ def main() -> int:
                 "Voice model is missing. Run: "
                 ".venv/bin/python scripts/download_voice_model.py"
             )
-        print('Listening offline for "open" or "close". Press Ctrl-C to stop.')
+        # Suppress native Vosk diagnostics before listen() constructs its Model.
+        try:
+            from vosk import SetLogLevel
+
+            SetLogLevel(-1)
+        except ImportError:
+            pass
+        if not args.quiet:
+            print('Listening offline for "open" or "close". Press Ctrl-C to stop.')
         listen(
             args.voice_model,
             shared_bus,
             minimum_confidence=args.voice_confidence,
             debounce_seconds=args.voice_debounce_seconds,
             device=args.voice_device,
+            verbose=not args.quiet,
         )
 
     try:
@@ -243,9 +270,11 @@ def main() -> int:
             bus,
             emg_runner=run_emg,
             voice_runner=run_voice,
+            quiet=args.quiet,
         )
     except KeyboardInterrupt:
-        print("\nNEOS stopped.")
+        if not args.quiet:
+            print("\nNEOS stopped.")
     except RuntimeError as exc:
         print(f"NEOS error: {exc}", file=sys.stderr)
         return 1

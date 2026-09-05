@@ -5,5 +5,3 @@ scikit-learn>=1.5,<2
 joblib>=1.4,<2
 vosk>=0.3.44,<0.4
 sounddevice>=0.5,<1
-
-# Planned ML dependencies (intentionally not installed yet):
